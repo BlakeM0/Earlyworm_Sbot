@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Early Worm Draw</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet"/>
+<script>
+// =============================================================================
+// CONFIGURATION — All settings and text are here. Nothing else needs changing.
+// =============================================================================
+
+// --- On-screen text ----------------------------------------------------------
+const TEXT_TITLE        = 'Early Worm Draw';            // Main heading
+const TEXT_SUBTITLE     = "Selecting tonight's winner"; // Smaller text below title
+const TEXT_IDLE         = 'Waiting for entries...';     // Shown on idle screen
+const TEXT_WINNER_LABEL = 'Early Worm Winner';          // Label above winner name
+
+// --- Background --------------------------------------------------------------
+// 'transparent' = see-through in OBS (recommended for overlays)
+// Any CSS colour e.g. '#111111', 'rgba(0,0,0,0.85)', '#1a0a2e'
+const BACKGROUND_COLOR   = 'transparent';
+
+// Opacity of the background (0.0 = fully invisible, 1.0 = fully opaque)
+// Only applies when BACKGROUND_COLOR is set to a colour, not 'transparent'
+// e.g. set BACKGROUND_COLOR to '#111111' and BACKGROUND_OPACITY to 0.85
+// for a dark semi-transparent background
+const BACKGROUND_OPACITY = 1.0;
+
+// --- Show / hide behaviour ---------------------------------------------------
+// true  = overlay is fully invisible while idle; fades in when a draw fires
+//         and fades out again after the winner display timeout.
+//         Use this if you want the overlay on screen all the time but only
+//         visible during draws.
+// false = idle screen is always visible; overlay never hides itself.
+const AUTO_HIDE = false;
+
+// --- Optional visual features ------------------------------------------------
+const SHOW_BORDER       = false;  // Outer border around the overlay
+const SHOW_CORNER_MARKS = false;  // Small L-shaped marks at each corner
+const SHOW_SCANLINES    = false;  // Retro CRT scanline effect
+const SHOW_DIRT_BAR     = false;  // Decorative bar along the bottom edge
+const SHOW_FOOTER_STATS = false;  // Entry count and status text at the bottom
+
+// --- Worm image --------------------------------------------------------------
+// Place your PNG in the same folder as this file.
+// Falls back to the 🐛 emoji automatically if the file is not found.
+const WORM_IMAGE        = 'worm.png';
+
+// --- Size & layout -----------------------------------------------------------
+// Adjust these if the overlay needs to be larger or smaller on your canvas.
+// OVERLAY_WIDTH and OVERLAY_HEIGHT should match your OBS browser source size.
+const OVERLAY_WIDTH   = 700;   // px
+const OVERLAY_HEIGHT  = 400;   // px — reduced from 500 to tighten the layout
+const DRUM_WIDTH      = 520;   // px — width of the scrolling name window
+const DRUM_HEIGHT     = 220;   // px — height of the scrolling name window
+const HEADER_GAP      = 12;    // px — space between header text and drum/winner
+
+// --- Drum --------------------------------------------------------------------
+// Background colour of the scrolling name window.
+// 'transparent' = no background, names float over whatever is behind the overlay.
+// Any CSS colour e.g. 'rgba(0,0,0,0.6)', '#111111', 'rgba(30,0,60,0.7)'
+const DRUM_BACKGROUND      = 'transparent';
+
+// --- Winner name -------------------------------------------------------------
+// Semi-transparent box behind the winner name for readability.
+// Any CSS colour e.g. 'rgba(0,0,0,0.75)', '#1a0a2e'. Set to '' to disable.
+const WINNER_BOX_COLOR     = 'rgba(0,0,0,0.75)';
+// Outline/stroke around the winner name text.
+// Any CSS colour e.g. 'rgba(0,0,0,0.9)', '#000000'. Set to '' to disable.
+const WINNER_OUTLINE_COLOR = 'rgba(0,0,0,0.9)';
+
+// --- Timing (milliseconds) ---------------------------------------------------
+const SPIN_DURATION     = 7000;  // Scroll animation length — keep in sync with C# CPH.Wait
+const WINNER_DISPLAY    = 10000; // How long the winner screen shows before hiding
+const POLL_INTERVAL     = 1500;  // How often to check EarlyWormData.json
+
+// =============================================================================
+</script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --accent:     #39ff14;
+    --accent-dim: #1a7a08;
+    --text:       #ffffff;
+    --text-dim:   rgba(255,255,255,0.4);
+  }
+
+  html, body {
+    overflow: hidden;
+    background: transparent;
+    font-family: 'Inter', sans-serif;
+  }
+
+  /* ── Main container ── */
+  #app {
+    /* Width, height and background set via JS from config constants */
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    transition: opacity 0.6s ease;
+  }
+
+  /* Auto-hide: start invisible; JS removes this class when a draw fires */
+  #app.hidden-idle {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #app.has-border { border: 2px solid var(--accent-dim); }
+
+  /* ── Optional: scanlines ── */
+  #scanlines {
+    display: none;
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0,0,0,0.12) 0px, rgba(0,0,0,0.12) 1px,
+      transparent 1px, transparent 3px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+  #scanlines.active { display: block; }
+
+  /* ── Optional: corner marks ── */
+  .corner {
+    display: none;
+    position: absolute;
+    width: 20px; height: 20px;
+    border-color: var(--accent);
+    border-style: solid;
+    opacity: 0.6;
+  }
+  .corner.active        { display: block; }
+  .corner.tl { top: 10px;    left: 10px;  border-width: 2px 0 0 2px; }
+  .corner.tr { top: 10px;    right: 10px; border-width: 2px 2px 0 0; }
+  .corner.bl { bottom: 10px; left: 10px;  border-width: 0 0 2px 2px; }
+  .corner.br { bottom: 10px; right: 10px; border-width: 0 2px 2px 0; }
+
+  /* ── Header — position controlled by JS using HEADER_GAP config ── */
+  #header {
+    text-align: center;
+    z-index: 10;
+  }
+  #header h1 {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 2rem;
+    letter-spacing: 0.18em;
+    color: var(--text);
+    line-height: 1;
+  }
+  #header .sub {
+    font-size: 0.6rem;
+    letter-spacing: 0.35em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  /* ── Drum / scroll window ── */
+  #drum-wrap {
+    position: relative;
+    width: 520px; height: 260px;
+    overflow: hidden;
+    border-radius: 6px;
+    /* Background applied via JS using DRUM_BACKGROUND config constant */
+  }
+  #drum-wrap::before,
+  #drum-wrap::after { content: none; }
+
+  /* Fade divs replace pseudo-elements so JS can set their colour */
+  .drum-fade {
+    position: absolute;
+    left: 0; right: 0;
+    height: 90px;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .drum-fade.top    { top: 0; }
+  .drum-fade.bottom { bottom: 0; }
+
+  /* Centre highlight bar */
+  #highlight-bar {
+    position: absolute;
+    top: 50%; left: 0; right: 0;
+    height: 52px;
+    transform: translateY(-50%);
+    background: rgba(255,255,255,0.04);
+    border-top: 1px solid rgba(255,255,255,0.12);
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    z-index: 4;
+    pointer-events: none;
+  }
+
+  /* ── Name strip ── */
+  #drum {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    will-change: transform;
+  }
+  .name-item {
+    height: 52px;
+    line-height: 52px;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.03em;
+    text-align: center;
+    width: 100%;
+    opacity: 0.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 24px;
+    transition: opacity 0.08s;
+  }
+  .name-item.center {
+    opacity: 1;
+    color: var(--accent);
+  }
+
+  /* ── Footer stats ── */
+  #footer {
+    position: absolute;
+    bottom: 20px; left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    gap: 48px;
+    z-index: 10;
+  }
+  .stat { text-align: center; }
+  .stat .val {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.5rem;
+    color: var(--text);
+    line-height: 1;
+  }
+  .stat .lbl {
+    font-size: 0.5rem;
+    letter-spacing: 0.3em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+
+  /* ── Winner banner ── */
+  #winner-banner {
+    position: absolute; inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.5s ease;
+  }
+  #winner-banner.show {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  #winner-banner .worm-img {
+    width: 72px; height: 72px;
+    object-fit: contain;
+    margin-bottom: 6px;
+    animation: wriggle 0.7s ease-in-out infinite alternate;
+  }
+  #winner-banner .worm-fallback {
+    font-size: 2.8rem;
+    margin-bottom: 6px;
+    animation: wriggle 0.7s ease-in-out infinite alternate;
+    display: none;
+  }
+  @keyframes wriggle {
+    from { transform: rotate(-7deg) translateX(-3px); }
+    to   { transform: rotate(7deg)  translateX(3px);  }
+  }
+  #winner-banner .winner-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.45em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  #winner-banner .winner-name {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 4.5rem;
+    letter-spacing: 0.1em;
+    color: var(--text);
+    line-height: 1;
+    /* Box and outline applied via JS using WINNER_BOX_COLOR and WINNER_OUTLINE_COLOR */
+    padding: 6px 24px;
+    border-radius: 6px;
+    animation: name-pulse 1.4s ease-in-out infinite alternate;
+  }
+  @keyframes name-pulse {
+    from { opacity: 0.9; transform: scale(1);    }
+    to   { opacity: 1;   transform: scale(1.02); }
+  }
+
+  /* ── Idle / waiting state ── */
+  #idle-msg {
+    position: absolute; inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    z-index: 10;
+    transition: opacity 0.4s;
+  }
+  #idle-msg .worm-img {
+    width: 60px; height: 60px;
+    object-fit: contain;
+    animation: wriggle 1.2s ease-in-out infinite alternate;
+  }
+  #idle-msg .worm-fallback {
+    font-size: 2.4rem;
+    animation: wriggle 1.2s ease-in-out infinite alternate;
+    display: none;
+  }
+  #idle-msg .idle-text {
+    font-size: 0.65rem;
+    letter-spacing: 0.3em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  #idle-msg.hidden { opacity: 0; pointer-events: none; }
+
+  /* ── Optional: dirt bar ── */
+  #dirt-bar {
+    display: none;
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 5px;
+    background: linear-gradient(90deg, #5c3d1e, #8b5e2f, #5c3d1e);
+    opacity: 0.5;
+  }
+  #dirt-bar.active { display: block; }
+
+  /* ── Particles ── */
+  #particles {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    z-index: 6;
+    overflow: hidden;
+  }
+  .particle {
+    position: absolute;
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    background: var(--accent);
+    opacity: 0;
+  }
+
+  #drum-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  #drum-section.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="scanlines"></div>
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <div id="header">
+    <h1 id="hdr-title"></h1>
+    <div class="sub" id="hdr-subtitle"></div>
+  </div>
+
+  <div id="idle-msg">
+    <img  class="worm-img"      id="idle-worm-img"   src="" alt=""/>
+    <span class="worm-fallback" id="idle-worm-emoji">🐛</span>
+    <div  class="idle-text"     id="idle-text-el"></div>
+  </div>
+
+  <div id="drum-section">
+    <div id="drum-wrap">
+      <div class="drum-fade top"    id="drum-fade-top"></div>
+      <div class="drum-fade bottom" id="drum-fade-bottom"></div>
+      <div id="highlight-bar"></div>
+      <div id="drum"></div>
+    </div>
+  </div>
+
+  <div id="winner-banner">
+    <img  class="worm-img"      id="winner-worm-img"  src="" alt=""/>
+    <span class="worm-fallback" id="winner-worm-emoji">🐛</span>
+    <div  class="winner-label"  id="winner-label-el"></div>
+    <div  class="winner-name"   id="winner-name-text">—</div>
+  </div>
+
+  <div id="footer">
+    <div class="stat">
+      <div class="val" id="stat-entries">0</div>
+      <div class="lbl">Worms</div>
+    </div>
+    <div class="stat">
+      <div class="val" id="stat-status">IDLE</div>
+      <div class="lbl">Status</div>
+    </div>
+  </div>
+
+  <div id="particles"></div>
+  <div id="dirt-bar"></div>
+</div>
+
+<script>
+// ============================================================
+// APPLY CONFIGURATION
+// ============================================================
+const ITEM_HEIGHT   = 52;
+const VISIBLE_ITEMS = 5;
+const DATA_FILE     = 'EarlyWormData.json';
+
+// Text
+document.getElementById('hdr-title').textContent       = TEXT_TITLE;
+document.getElementById('hdr-subtitle').textContent    = TEXT_SUBTITLE;
+document.getElementById('idle-text-el').textContent    = TEXT_IDLE;
+document.getElementById('winner-label-el').textContent = TEXT_WINNER_LABEL;
+
+// Size and layout
+const appEl   = document.getElementById('app');
+appEl.style.width  = OVERLAY_WIDTH  + 'px';
+appEl.style.height = OVERLAY_HEIGHT + 'px';
+document.body.style.width  = OVERLAY_WIDTH  + 'px';
+document.body.style.height = OVERLAY_HEIGHT + 'px';
+document.querySelector('#drum-wrap').style.width      = DRUM_WIDTH  + 'px';
+document.querySelector('#drum-wrap').style.height     = DRUM_HEIGHT + 'px';
+document.querySelector('#drum-wrap').style.background = DRUM_BACKGROUND;
+
+// Drum fades — match the drum background so they blend cleanly.
+// When drum is transparent the fades are also transparent (fully hidden).
+const fadeColor = DRUM_BACKGROUND === 'transparent' ? 'transparent' : DRUM_BACKGROUND;
+document.getElementById('drum-fade-top').style.background    = `linear-gradient(to bottom, ${fadeColor}, transparent)`;
+document.getElementById('drum-fade-bottom').style.background = `linear-gradient(to top,   ${fadeColor}, transparent)`;
+
+// Winner name — box background and text outline
+const winnerNameEl = document.getElementById('winner-name-text');
+if (WINNER_BOX_COLOR)     winnerNameEl.style.background = WINNER_BOX_COLOR;
+if (WINNER_OUTLINE_COLOR) winnerNameEl.style.webkitTextStroke = `2px ${WINNER_OUTLINE_COLOR}`;
+
+// Position header and content close together using HEADER_GAP
+// Header sits above centre, drum/winner sits just below it
+const headerEl  = document.getElementById('header');
+const headerH   = 52; // approximate rendered height of title + subtitle
+const totalH    = headerH + HEADER_GAP + DRUM_HEIGHT;
+const topStart  = (OVERLAY_HEIGHT - totalH) / 2;
+headerEl.style.position = 'absolute';
+headerEl.style.top      = topStart + 'px';
+headerEl.style.left     = '0';
+headerEl.style.right    = '0';
+
+const drumSection = document.getElementById('drum-section');
+drumSection.style.position   = 'absolute';
+drumSection.style.top        = (topStart + headerH + HEADER_GAP) + 'px';
+drumSection.style.left       = '0';
+drumSection.style.right      = '0';
+drumSection.style.display    = 'flex';
+drumSection.style.justifyContent = 'center';
+// Background — opacity only affects the background, not the content inside.
+// We do this by converting the colour + opacity into a single rgba() value
+// rather than using CSS opacity on the whole element (which would affect everything).
+if (BACKGROUND_COLOR === 'transparent') {
+  appEl.style.background = 'transparent';
+} else {
+  // Parse the colour via a temporary canvas to extract r,g,b values,
+  // then recombine with BACKGROUND_OPACITY as the alpha channel
+  const tmp     = document.createElement('canvas');
+  const ctx     = tmp.getContext('2d');
+  ctx.fillStyle = BACKGROUND_COLOR;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+  appEl.style.background = `rgba(${r},${g},${b},${BACKGROUND_OPACITY})`;
+}
+
+// Optional features
+if (SHOW_BORDER)       document.getElementById('app').classList.add('has-border');
+if (SHOW_SCANLINES)    document.getElementById('scanlines').classList.add('active');
+if (SHOW_DIRT_BAR)     document.getElementById('dirt-bar').classList.add('active');
+if (SHOW_CORNER_MARKS) document.querySelectorAll('.corner').forEach(c => c.classList.add('active'));
+document.getElementById('footer').style.display = SHOW_FOOTER_STATS ? 'flex' : 'none';
+
+// Auto-hide: start invisible if toggle is on
+if (AUTO_HIDE) appEl.classList.add('hidden-idle');
+
+// Worm image — falls back to emoji if file not found
+function setupWormImage(imgId, fallbackId) {
+  const img      = document.getElementById(imgId);
+  const fallback = document.getElementById(fallbackId);
+  img.src = WORM_IMAGE;
+  img.onerror = () => {
+    img.style.display      = 'none';
+    fallback.style.display = 'block';
+  };
+}
+setupWormImage('idle-worm-img',   'idle-worm-emoji');
+setupWormImage('winner-worm-img', 'winner-worm-emoji');
+
+// ============================================================
+// STATE
+// ============================================================
+let state          = 'idle';
+let currentEntries = [];
+let pollTimer      = null;
+
+// ============================================================
+// STALE DATA GUARD
+// Record the time this page loaded. Any trigger in the JSON that
+// was written before this moment is treated as stale and ignored.
+// This prevents the overlay re-firing when OBS refreshes the source.
+// ============================================================
+const SESSION_START = Date.now();
+
+// ============================================================
+// DOM refs
+// ============================================================
+const drum         = document.getElementById('drum');
+// drumSection already declared in layout block above
+const idleMsg      = document.getElementById('idle-msg');
+const winnerBanner = document.getElementById('winner-banner');
+const winnerName   = document.getElementById('winner-name-text');
+const statEntries  = document.getElementById('stat-entries');
+const statStatus   = document.getElementById('stat-status');
+const particles    = document.getElementById('particles');
+
+// ============================================================
+// POLL DATA FILE
+// Streamer.bot writes EarlyWormData.json next to this HTML file.
+// Format: { "trigger": "spin"|"reset"|"", "entries": [...], "winner": "...", "timestamp": 1234567890 }
+// The timestamp field is written by the C# code and used to detect stale triggers.
+// ============================================================
+let lastTrigger   = '';
+let lastTimestamp = 0;
+
+async function poll() {
+  try {
+    const res  = await fetch(DATA_FILE + '?t=' + Date.now());
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const ts = data.timestamp || 0;
+
+    currentEntries = data.entries || [];
+    if (SHOW_FOOTER_STATS) statEntries.textContent = currentEntries.length;
+
+    // Ignore any trigger that was written before this page loaded (stale data)
+    if (ts < SESSION_START) return;
+
+    // Ignore triggers we've already acted on
+    if (ts === lastTimestamp) return;
+
+    if (data.trigger === 'spin' && state === 'idle') {
+      lastTimestamp = ts;
+      lastTrigger   = data.trigger;
+      startSpin(data.entries, data.winner);
+    } else if (data.trigger === 'reset') {
+      lastTimestamp = ts;
+      lastTrigger   = data.trigger;
+      resetOverlay();
+    }
+  } catch(e) {
+    // File not ready yet — that's fine
+  }
+}
+
+// ============================================================
+// BUILD DRUM
+// ============================================================
+function buildDrum(entries, winner) {
+  drum.innerHTML = '';
+  const allNames = [];
+
+  for (let i = 0; i < 10; i++) {
+    const shuffled = [...entries].sort(() => Math.random() - 0.5);
+    allNames.push(...shuffled);
+  }
+  allNames.push(...entries.slice(0, 8));
+  allNames.push(winner);
+
+  allNames.forEach(name => {
+    const el       = document.createElement('div');
+    el.className   = 'name-item';
+    el.textContent = '@' + name;
+    drum.appendChild(el);
+  });
+
+  return allNames;
+}
+
+// ============================================================
+// SPIN ANIMATION
+// ============================================================
+function startSpin(entries, winner) {
+  if (state !== 'idle') return;
+  state = 'spinning';
+  if (SHOW_FOOTER_STATS) statStatus.textContent = 'SPINNING';
+
+  // Fade the overlay in if auto-hide is on
+  if (AUTO_HIDE) appEl.classList.remove('hidden-idle');
+
+  idleMsg.classList.add('hidden');
+  drumSection.classList.add('show');
+
+  const allNames     = buildDrum(entries, winner);
+  const winnerIndex  = allNames.length - 1;
+  const centerOffset = Math.floor(VISIBLE_ITEMS / 2) * ITEM_HEIGHT;
+  const targetY      = centerOffset - (winnerIndex * ITEM_HEIGHT);
+
+  drum.style.transform  = `translateY(${centerOffset}px)`;
+  drum.style.transition = 'none';
+
+  setTimeout(() => {
+    drum.style.transition = `transform ${SPIN_DURATION}ms cubic-bezier(0.02, 0.98, 0.20, 1.0)`;
+    drum.style.transform  = `translateY(${targetY}px)`;
+    updateCentreHighlight();
+  }, 50);
+
+  const highlightInterval = setInterval(updateCentreHighlight, 80);
+
+  setTimeout(() => {
+    clearInterval(highlightInterval);
+    showWinner(winner);
+  }, SPIN_DURATION + 200);
+}
+
+function updateCentreHighlight() {
+  const items    = drum.querySelectorAll('.name-item');
+  const drumRect = drum.parentElement.getBoundingClientRect();
+  const centreY  = drumRect.top + drumRect.height / 2;
+  items.forEach(el => {
+    const mid = el.getBoundingClientRect().top + ITEM_HEIGHT / 2;
+    el.classList.toggle('center', Math.abs(mid - centreY) < ITEM_HEIGHT / 2);
+  });
+}
+
+// ============================================================
+// WINNER REVEAL
+// ============================================================
+function showWinner(winner) {
+  state = 'winner';
+  if (SHOW_FOOTER_STATS) statStatus.textContent = 'WINNER';
+
+  winnerName.textContent = '@' + winner;
+  winnerBanner.classList.add('show');
+  spawnParticles();
+
+  // Record exactly when the winner was revealed.
+  // The hide logic checks this to ensure the winner is never dismissed
+  // before WINNER_DISPLAY ms have elapsed, regardless of resets or repolls.
+  const revealedAt = Date.now();
+
+  setTimeout(() => {
+    // Double-check the full display time has actually passed before hiding.
+    // Guards against OBS scene switches or other timing interference.
+    const elapsed   = Date.now() - revealedAt;
+    const remaining = WINNER_DISPLAY - elapsed;
+
+    const doHide = () => {
+      winnerBanner.classList.remove('show');
+      setTimeout(() => {
+        state = 'idle'; // Clear winner lock before calling resetOverlay
+        resetOverlay();
+        if (AUTO_HIDE) appEl.classList.add('hidden-idle');
+      }, 600);
+    };
+
+    if (remaining > 0) {
+      setTimeout(doHide, remaining);
+    } else {
+      doHide();
+    }
+  }, WINNER_DISPLAY);
+}
+
+// ============================================================
+// PARTICLES
+// ============================================================
+function spawnParticles() {
+  for (let i = 0; i < 28; i++) {
+    setTimeout(() => {
+      const p      = document.createElement('div');
+      p.className  = 'particle';
+      p.style.left = (Math.random() * 800) + 'px';
+      p.style.top  = '500px';
+      particles.appendChild(p);
+
+      const duration = 900 + Math.random() * 1100;
+      const rise     = 220 + Math.random() * 320;
+      const drift    = (Math.random() - 0.5) * 100;
+
+      p.animate([
+        { transform: 'translate(0,0)',                    opacity: 1 },
+        { transform: `translate(${drift}px,-${rise}px)`, opacity: 0 }
+      ], { duration, easing: 'ease-out', fill: 'forwards' });
+
+      setTimeout(() => p.remove(), duration + 100);
+    }, i * 65);
+  }
+}
+
+// ============================================================
+// RESET — clears the drum and returns to idle state
+// Note: does NOT control overlay visibility — that is handled
+// separately by the AUTO_HIDE logic in showWinner and startSpin.
+// Ignored if the winner screen is currently locked on display.
+// ============================================================
+function resetOverlay() {
+  // Don't allow a reset to wipe the winner screen mid-display
+  if (state === 'winner') return;
+
+  state = 'idle';
+  if (SHOW_FOOTER_STATS) {
+    statStatus.textContent  = 'IDLE';
+    statEntries.textContent = '0';
+  }
+  winnerBanner.classList.remove('show');
+  drumSection.classList.remove('show');
+  idleMsg.classList.remove('hidden');
+  drum.innerHTML        = '';
+  drum.style.transition = 'none';
+  drum.style.transform  = '';
+}
+
+// ============================================================
+// DEMO MODE  —  Press D to demo, R to reset
+// ============================================================
+document.addEventListener('keydown', e => {
+  if (e.key === 'd' || e.key === 'D') runDemo();
+  if (e.key === 'r' || e.key === 'R') {
+    resetOverlay();
+    if (AUTO_HIDE) appEl.classList.add('hidden-idle');
+  }
+});
+
+function runDemo() {
+  if (state !== 'idle') return;
+  const demoEntries = [
+    'the_space_prophet','emmagracelesss','streamstickers','streamelements',
+    'bunnyknuckle','amijayxo','chellaplaysstuff','thexeltox',
+    'moonpebble','glitchwitch','ferncroft','zapzapzap',
+    'binarytoast','quietstorm','velvetclaw','solarflare7',
+    'inkblot42','mistwalker','dustdevil','frogleap'
+  ];
+  const winner = demoEntries[Math.floor(Math.random() * demoEntries.length)];
+  if (SHOW_FOOTER_STATS) statEntries.textContent = demoEntries.length;
+  startSpin(demoEntries, winner);
+}
+
+// ============================================================
+// START POLLING
+// ============================================================
+pollTimer = setInterval(poll, POLL_INTERVAL);
+poll();
+</script>
+</body>
+</html>
